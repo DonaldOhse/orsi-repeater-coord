@@ -1,0 +1,19 @@
+# Sensitive files
+includes/config.php
+uploads/
+splat_cache/*.png
+splat_cache/*.zip
+splat_cache/*.csv
+splat_cache/*.sql
+*.bak.*
+*.log
+
+# Dependencies
+vendor/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# PHP temp files
+*.tmp

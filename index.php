@@ -1,0 +1,279 @@
+<?php
+require_once __DIR__ . '/includes/config.php';
+$page_title = 'Repeater Database';
+$db = get_db();
+
+// ── Filters ──────────────────────────────────────────────────────
+$where  = ['1=1', 'archived_at IS NULL'];
+$params = [];
+
+// Hide private repeaters from public
+if (!is_logged_in()) {
+    $where[] = 'private = 0';
+}
+
+foreach (['district','type','status','county'] as $col) {
+    if (!empty($_GET[$col])) {
+        $where[]  = "$col = ?";
+        $params[] = $_GET[$col];
+    }
+}
+if (!empty($_GET['search'])) {
+    $s = '%' . $_GET['search'] . '%';
+    $where[]  = "(callsign LIKE ? OR trustee LIKE ? OR sponsor LIKE ? OR city LIKE ? OR county LIKE ? OR notes LIKE ?)";
+    $params   = array_merge($params, [$s,$s,$s,$s,$s,$s]);
+}
+// Frequency range filter — if min==max treat as band search with ±2 MHz tolerance
+$freq_min = !empty($_GET['freq_min']) ? (float)$_GET['freq_min'] : null;
+$freq_max = !empty($_GET['freq_max']) ? (float)$_GET['freq_max'] : null;
+if ($freq_min !== null && $freq_max !== null && $freq_min == $freq_max) {
+    $where[] = 'output_freq >= ?'; $params[] = $freq_min - 2.0;
+    $where[] = 'output_freq <= ?'; $params[] = $freq_max + 2.0;
+} else {
+    if ($freq_min !== null) { $where[] = 'output_freq >= ?'; $params[] = $freq_min; }
+    if ($freq_max !== null) { $where[] = 'output_freq <= ?'; $params[] = $freq_max; }
+}
+if (isset($_GET['skywarn']) && $_GET['skywarn'] === '1') { $where[] = 'skywarn = 1'; }
+if (isset($_GET['linked'])  && $_GET['linked']  === '1') { $where[] = 'linked = 1'; }
+
+$sql_where = implode(' AND ', $where);
+
+// ── Sorting ───────────────────────────────────────────────────────
+$sort_cols = ['output_freq','callsign','district','status','type','county','city'];
+$sort = in_array($_GET['sort'] ?? '', $sort_cols) ? $_GET['sort'] : 'output_freq';
+$dir  = ($_GET['dir'] ?? 'ASC') === 'DESC' ? 'DESC' : 'ASC';
+$flip = $dir === 'ASC' ? 'DESC' : 'ASC';
+
+// ── Pagination ────────────────────────────────────────────────────
+$per_page = 50;
+$page     = max(1, (int)($_GET['p'] ?? 1));
+$cnt_stmt = $db->prepare("SELECT COUNT(*) FROM repeaters WHERE $sql_where");
+$cnt_stmt->execute($params);
+$total    = (int)$cnt_stmt->fetchColumn();
+$pages    = max(1, (int)ceil($total / $per_page));
+$page     = min($page, $pages);
+$offset   = ($page - 1) * $per_page;
+
+$stmt = $db->prepare("SELECT * FROM repeaters WHERE $sql_where ORDER BY $sort $dir LIMIT $per_page OFFSET $offset");
+$stmt->execute($params);
+$rows = $stmt->fetchAll();
+
+// ── Lookup lists ──────────────────────────────────────────────────
+$districts = $db->query("SELECT DISTINCT district FROM repeaters WHERE archived_at IS NULL ORDER BY district")->fetchAll(PDO::FETCH_COLUMN);
+$types      = $db->query("SELECT DISTINCT type FROM repeaters WHERE archived_at IS NULL ORDER BY type")->fetchAll(PDO::FETCH_COLUMN);
+$statuses   = $db->query("SELECT DISTINCT status FROM repeaters WHERE archived_at IS NULL ORDER BY status")->fetchAll(PDO::FETCH_COLUMN);
+$counties   = $db->query("SELECT DISTINCT county FROM repeaters WHERE archived_at IS NULL AND county != '' ORDER BY county")->fetchAll(PDO::FETCH_COLUMN);
+
+// ── Stats ─────────────────────────────────────────────────────────
+$stats = $db->query("SELECT status, COUNT(*) c FROM repeaters WHERE archived_at IS NULL GROUP BY status")->fetchAll();
+$stat_map = array_column($stats, 'c', 'status');
+
+function sort_link(string $col, string $label, string $cur, string $dir, string $flip, array $get): string {
+    $p = array_merge($get, ['sort'=>$col,'dir'=>$col===$cur?$flip:'ASC','p'=>1]);
+    $arrow = $col===$cur ? ($dir==='ASC'?' ▲':' ▼') : '';
+    return '<a href="?'.http_build_query($p).'">'.htmlspecialchars($label).$arrow.'</a>';
+}
+function badge_status(string $s): string {
+    $map = ['OPERATIONAL'=>'operational','DEAD'=>'dead','PROPOSED'=>'proposed',
+            'CONSTRUCTION'=>'construction','DOWN TEMPORARILY'=>'down-temporarily',
+            'DECOORDINATED'=>'decoordinated','UNCOORDINATED'=>'uncoordinated','UNKNOWN'=>'unknown'];
+    $cls = $map[$s] ?? 'unknown';
+    return '<span class="badge badge-'.$cls.'">'.htmlspecialchars($s).'</span>';
+}
+function badge_type(string $t): string {
+    $map = ['REPEATER'=>'repeater','D-STAR'=>'dstar','DMR'=>'dmr','FUSION'=>'fusion','P-25'=>'p25','ATV'=>'atv'];
+    $cls = $map[$t] ?? 'repeater';
+    return '<span class="badge badge-type-'.$cls.'">'.htmlspecialchars($t).'</span>';
+}
+function bool_icon(mixed $v): string {
+    return $v ? '<span class="bool-yes"><i class="fa fa-check"></i></span>'
+              : '<span class="bool-no"><i class="fa fa-minus"></i></span>';
+}
+
+$qp = $_GET; // for links
+include __DIR__ . '/includes/header.php';
+?>
+
+<div class="page-title"><i class="fa fa-tower-broadcast"></i> Oklahoma Repeater Database</div>
+
+<!-- Stats Row -->
+<div class="stats-grid">
+  <div class="stat-card"><div class="stat-icon"><i class="fa fa-database"></i></div><div class="stat-value"><?= number_format($total) ?></div><div class="stat-label">Matching</div></div>
+  <div class="stat-card"><div class="stat-icon"><i class="fa fa-circle-check"></i></div><div class="stat-value"><?= $stat_map['OPERATIONAL'] ?? 0 ?></div><div class="stat-label">Operational</div></div>
+  <div class="stat-card"><div class="stat-icon"><i class="fa fa-circle-xmark"></i></div><div class="stat-value"><?= $stat_map['DEAD'] ?? 0 ?></div><div class="stat-label">Dead</div></div>
+  <div class="stat-card"><div class="stat-icon"><i class="fa fa-clock"></i></div><div class="stat-value"><?= $stat_map['PROPOSED'] ?? 0 ?></div><div class="stat-label">Proposed</div></div>
+  <div class="stat-card"><div class="stat-icon"><i class="fa fa-triangle-exclamation"></i></div><div class="stat-value"><?= $stat_map['DOWN TEMPORARILY'] ?? 0 ?></div><div class="stat-label">Down Temp</div></div>
+</div>
+
+<!-- Filter Bar -->
+<form method="get" class="filter-bar">
+  <div class="form-group">
+    <label>Search</label>
+    <input type="text" name="search" value="<?= h($_GET['search'] ?? '') ?>" placeholder="Call, city, sponsor…">
+  </div>
+  <div class="form-group">
+    <label>District</label>
+    <select name="district">
+      <option value="">All Districts</option>
+      <?php foreach ($districts as $d): ?><option value="<?= h($d) ?>" <?= ($_GET['district']??'')===$d?'selected':'' ?>><?= h($d) ?></option><?php endforeach; ?>
+    </select>
+  </div>
+  <div class="form-group">
+    <label>Type</label>
+    <select name="type">
+      <option value="">All Types</option>
+      <?php foreach ($types as $t): ?><option value="<?= h($t) ?>" <?= ($_GET['type']??'')===$t?'selected':'' ?>><?= h($t) ?></option><?php endforeach; ?>
+    </select>
+  </div>
+  <div class="form-group">
+    <label>Status</label>
+    <select name="status">
+      <option value="">All Statuses</option>
+      <?php foreach ($statuses as $st): ?><option value="<?= h($st) ?>" <?= ($_GET['status']??'')===$st?'selected':'' ?>><?= h($st) ?></option><?php endforeach; ?>
+    </select>
+  </div>
+  <div class="form-group">
+    <label>County</label>
+    <select name="county">
+      <option value="">All Counties</option>
+      <?php foreach ($counties as $c): ?><option value="<?= h($c) ?>" <?= ($_GET['county']??'')===$c?'selected':'' ?>><?= h($c) ?></option><?php endforeach; ?>
+    </select>
+  </div>
+  <div class="form-group">
+    <label>Freq Min (MHz)</label>
+    <input type="number" name="freq_min" value="<?= h($_GET['freq_min'] ?? '') ?>" step="0.005" placeholder="e.g. 144">
+  </div>
+  <div class="form-group">
+    <label>Freq Max (MHz)</label>
+    <input type="number" name="freq_max" value="<?= h($_GET['freq_max'] ?? '') ?>" step="0.005" placeholder="e.g. 148">
+  </div>
+  <div class="form-group">
+    <label>&nbsp;</label>
+    <div style="display:flex;gap:6px;align-items:center">
+      <label class="form-check"><input type="checkbox" name="skywarn" value="1" <?= !empty($_GET['skywarn'])?'checked':'' ?>> SKYWARN</label>
+      <label class="form-check"><input type="checkbox" name="linked"  value="1" <?= !empty($_GET['linked']) ?'checked':'' ?>> Linked</label>
+    </div>
+  </div>
+  <div class="form-group">
+    <label>&nbsp;</label>
+    <div style="display:flex;gap:6px;">
+      <button type="submit" class="btn btn-primary btn-sm"><i class="fa fa-filter"></i> Filter</button>
+      <a href="<?= BASE_PATH ?>/index.php" class="btn btn-secondary btn-sm"><i class="fa fa-xmark"></i> Clear</a>
+    </div>
+  </div>
+</form>
+
+<!-- Action buttons -->
+<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-wrap:wrap;gap:8px;">
+  <span class="text-muted"><?= number_format($total) ?> repeater<?= $total!=1?'s':'' ?> &mdash; page <?= $page ?> of <?= $pages ?></span>
+  <div style="display:flex;gap:8px;">
+    <?php if (is_logged_in() && in_array($user['role'],['admin','coordinator'])): ?>
+    <a href="<?= BASE_PATH ?>/admin/edit_repeater.php" class="btn btn-success btn-sm"><i class="fa fa-plus"></i> Add Repeater</a>
+    <?php endif; ?>
+    <a href="<?= BASE_PATH ?>/export.php?<?= http_build_query(array_diff_key($_GET,['p'=>1])) ?>" class="btn btn-secondary btn-sm"><i class="fa fa-download"></i> Export CSV</a>
+    <a href="<?= BASE_PATH ?>/conflicts.php" class="btn btn-warning btn-sm"><i class="fa fa-triangle-exclamation"></i> Check Conflicts</a>
+  </div>
+</div>
+
+<!-- Table -->
+<div class="card">
+  <div class="table-wrap">
+    <table class="data-table">
+      <thead><tr>
+        <th class="sortable"><?= sort_link('output_freq','Output Freq',$sort,$dir,$flip,$qp) ?></th>
+        <th>Input</th>
+        <th class="sortable"><?= sort_link('callsign','Callsign',$sort,$dir,$flip,$qp) ?></th>
+        <th class="sortable"><?= sort_link('type','Type',$sort,$dir,$flip,$qp) ?></th>
+        <th class="sortable"><?= sort_link('status','Status',$sort,$dir,$flip,$qp) ?></th>
+        <th class="sortable"><?= sort_link('district','District',$sort,$dir,$flip,$qp) ?></th>
+        <th class="sortable"><?= sort_link('county','County',$sort,$dir,$flip,$qp) ?></th>
+        <th class="sortable"><?= sort_link('city','City',$sort,$dir,$flip,$qp) ?></th>
+        <th>Access</th>
+        <th>Open</th>
+        <th>Patch</th>
+        <th>SKY</th>
+        <th>Linked</th>
+        <th>Internet</th>
+        <th>Actions</th>
+      </tr></thead>
+      <tbody>
+      <?php if (!$rows): ?>
+        <tr><td colspan="15" class="text-center text-muted" style="padding:30px">No records found.</td></tr>
+      <?php else: foreach ($rows as $r): ?>
+        <tr style="cursor:pointer" onclick="window.location='<?= BASE_PATH ?>/repeater.php?id=<?= $r['id'] ?>'" onmouseover="this.style.background='#f0f4f8'" onmouseout="this.style.background=''">
+          <td><span class="freq"><?= number_format((float)$r['output_freq'],4) ?></span></td>
+          <td><span class="freq"><?= number_format((float)$r['input_freq'],4) ?></span></td>
+          <td><a href="<?= BASE_PATH ?>/repeater.php?id=<?= $r['id'] ?>" class="callsign-link"><?= h($r['callsign']) ?></a><?= $r['private'] ? ' <span title="Private" style="color:#d97706"><i class="fa fa-lock"></i></span>' : '' ?></td>
+          <td><?= badge_type($r['type']) ?><?= $r['mixed_mode'] ? ' <span class="badge" style="background:#dbeafe;color:#1e40af;font-size:.65rem">MM</span>' : '' ?></td>
+          <td><?= badge_status($r['status']) ?></td>
+          <td><?= h($r['district']) ?></td>
+          <td><?= h($r['county']) ?></td>
+          <td><?= h($r['city']) ?></td>
+          <td><?php
+            switch($r['tone_type'] ?? 'CARRIER') {
+                case 'CTCSS':
+                    echo $r['pl_tone'] ? '<span title="CTCSS/PL">'.number_format((float)$r['pl_tone'],1).' Hz</span>' : '<span class="text-muted">CTCSS</span>';
+                    break;
+                case 'TSQ':
+                    echo $r['tsq_tone'] ? '<span title="TSQ">TSQ '.number_format((float)$r['tsq_tone'],1).' Hz</span>' : '<span class="text-muted">TSQ</span>';
+                    break;
+                case 'DCS':
+                    echo $r['dcs_code'] ? '<span title="DCS">DCS D'.$r['dcs_code'].'</span>' : '<span class="text-muted">DCS</span>';
+                    break;
+                case 'DMR':
+                    echo '<span title="DMR">CC'.($r['dmr_color_code'] ?? '?').'</span>';
+                    if ($r['dmr_talk_group']) echo '<br><small class="text-muted">TG '.$r['dmr_talk_group'].'</small>';
+                    break;
+                case 'DSTAR':
+                    echo '<span title="D-STAR">D-STAR</span>';
+                    if ($r['dstar_module']) echo ' Mod '.$r['dstar_module'];
+                    break;
+                case 'FUSION':
+                    echo '<span title="Fusion/C4FM">C4FM</span>';
+                    if ($r['fusion_room']) echo '<br><small class="text-muted">'.$r['fusion_room'].'</small>';
+                    break;
+                case 'P25':
+                    echo '<span title="P-25">P-25</span>';
+                    if ($r['p25_nac']) echo '<br><small class="text-muted">NAC '.$r['p25_nac'].'</small>';
+                    break;
+                default:
+                    echo '<span class="text-muted">Carrier</span>';
+            }
+          ?></td>
+          <td><?= bool_icon($r['open_system']) ?></td>
+          <td><?= bool_icon($r['autopatch']) ?></td>
+          <td><?= bool_icon($r['skywarn']) ?></td>
+          <td><?= bool_icon($r['linked']) ?></td>
+          <td><?= $r['internet_link'] ? '<span title="'.h($r['internet_link']).'"><i class="fa fa-link"></i></span>' : '' ?></td>
+          <td>
+            <a href="<?= BASE_PATH ?>/repeater.php?id=<?= $r['id'] ?>" class="btn btn-sm btn-primary" title="View"><i class="fa fa-eye"></i></a>
+            <?php if (is_logged_in() && in_array($user['role'],['admin','coordinator'])): ?>
+            <a href="<?= BASE_PATH ?>/admin/edit_repeater.php?id=<?= $r['id'] ?>" class="btn btn-sm btn-warning" title="Edit"><i class="fa fa-pen"></i></a>
+            <?php endif; ?>
+          </td>
+        </tr>
+      <?php endforeach; endif; ?>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- Pagination -->
+<?php if ($pages > 1): ?>
+<div class="pagination">
+  <?php
+  $base = array_merge($_GET, ['sort'=>$sort,'dir'=>$dir]);
+  if ($page>1) echo '<a href="?'.http_build_query(array_merge($base,['p'=>1])).'">« First</a>';
+  if ($page>1) echo '<a href="?'.http_build_query(array_merge($base,['p'=>$page-1])).'">‹ Prev</a>';
+  $start = max(1,$page-3); $end = min($pages,$page+3);
+  for ($i=$start;$i<=$end;$i++) {
+      if ($i==$page) echo "<span class='current'>$i</span>";
+      else echo '<a href="?'.http_build_query(array_merge($base,['p'=>$i])).'">'.$i.'</a>';
+  }
+  if ($page<$pages) echo '<a href="?'.http_build_query(array_merge($base,['p'=>$page+1])).'">Next ›</a>';
+  if ($page<$pages) echo '<a href="?'.http_build_query(array_merge($base,['p'=>$pages])).'">Last »</a>';
+  ?>
+</div>
+<?php endif; ?>
+
+<?php include __DIR__ . '/includes/footer.php'; ?>
